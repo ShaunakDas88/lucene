@@ -20,6 +20,8 @@ package org.apache.lucene.util.hnsw;
 import static org.apache.lucene.search.DocIdSetIterator.NO_MORE_DOCS;
 
 import java.io.IOException;
+//import java.util.Arrays;
+import java.util.Map;
 import org.apache.lucene.index.VectorEncoding;
 import org.apache.lucene.index.VectorSimilarityFunction;
 import org.apache.lucene.util.BitSet;
@@ -371,6 +373,93 @@ public class HnswGraphSearcher<T> {
           break;
         }
         float friendSimilarity = compare(query, vectors, friendOrd);
+        numVisited++;
+        if (friendSimilarity >= minAcceptedSimilarity) {
+          candidates.add(friendOrd, friendSimilarity);
+          if (acceptOrds == null || acceptOrds.get(friendOrd)) {
+            if (results.insertWithOverflow(friendOrd, friendSimilarity) && results.size() >= topK) {
+              minAcceptedSimilarity = results.topScore();
+            }
+          }
+        }
+      }
+    }
+    while (results.size() > topK) {
+      results.pop();
+    }
+    results.setVisitedCount(numVisited);
+  }
+
+  void searchLevel(
+      NeighborQueue results,
+      T query,
+      int topK,
+      int level,
+      final int[] eps,
+      RandomAccessVectorValues<T> vectors,
+      HnswGraph graph,
+      Bits acceptOrds,
+      int visitedLimit,
+      ScoreCache scoreCache)
+      throws IOException {
+    assert results.isMinHeap();
+
+    int size = graph.size();
+    prepareScratchState(vectors.size());
+
+    int numVisited = 0;
+    for (int ep : eps) {
+      if (visited.getAndSet(ep) == false) {
+        if (numVisited >= visitedLimit) {
+          results.markIncomplete();
+          break;
+        }
+
+        Float score = scoreCache.get(ep);
+        if (score == null) {
+          score = compare(query, vectors, ep);
+          scoreCache.put(ep, score);
+        }
+
+        numVisited++;
+        candidates.add(ep, score);
+        if (acceptOrds == null || acceptOrds.get(ep)) {
+          results.add(ep, score);
+        }
+      }
+    }
+
+    // A bound that holds the minimum similarity to the query vector that a candidate vector must
+    // have to be considered.
+    float minAcceptedSimilarity = Float.NEGATIVE_INFINITY;
+    if (results.size() >= topK) {
+      minAcceptedSimilarity = results.topScore();
+    }
+    while (candidates.size() > 0 && results.incomplete() == false) {
+      // get the best candidate (closest or best scoring)
+      float topCandidateSimilarity = candidates.topScore();
+      if (topCandidateSimilarity < minAcceptedSimilarity) {
+        break;
+      }
+
+      int topCandidateNode = candidates.pop();
+      graphSeek(graph, level, topCandidateNode);
+      int friendOrd;
+      while ((friendOrd = graphNextNeighbor(graph)) != NO_MORE_DOCS) {
+        assert friendOrd < size : "friendOrd=" + friendOrd + "; size=" + size;
+        if (visited.getAndSet(friendOrd)) {
+          continue;
+        }
+
+        if (numVisited >= visitedLimit) {
+          results.markIncomplete();
+          break;
+        }
+        Float friendSimilarity = scoreCache.get(friendOrd);
+        if (friendSimilarity == null) {
+          friendSimilarity = compare(query, vectors, friendOrd);
+          scoreCache.put(friendOrd, friendSimilarity);
+        }
         numVisited++;
         if (friendSimilarity >= minAcceptedSimilarity) {
           candidates.add(friendOrd, friendSimilarity);

@@ -21,6 +21,7 @@ import static java.lang.Math.log;
 import static org.apache.lucene.search.DocIdSetIterator.NO_MORE_DOCS;
 
 import java.io.IOException;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Locale;
 import java.util.Map;
@@ -70,6 +71,7 @@ public final class HnswGraphBuilder<T> {
   private final HnswGraphSearcher<T> graphSearcher;
   private final NeighborQueue entryCandidates; // for upper levels of graph search
   private final NeighborQueue beamCandidates; // for levels of graph where we add the node
+  private final ScoreCache scoreCache;
 
   final OnHeapHnswGraph hnsw;
 
@@ -153,6 +155,7 @@ public final class HnswGraphBuilder<T> {
     scratch = new NeighborArray(Math.max(beamWidth, M + 1), false);
     entryCandidates = new NeighborQueue(1, false);
     beamCandidates = new NeighborQueue(beamWidth, false);
+    scoreCache = new ScoreCache();
     this.initializedNodes = new HashSet<>();
   }
 
@@ -272,11 +275,12 @@ public final class HnswGraphBuilder<T> {
     }
 
     // for levels > nodeLevel search with topk = 1
+    scoreCache.clear();
     NeighborQueue candidates = entryCandidates;
     for (int level = curMaxLevel; level > nodeLevel; level--) {
       candidates.clear();
       graphSearcher.searchLevel(
-          candidates, value, 1, level, eps, vectors, hnsw, null, Integer.MAX_VALUE);
+          candidates, value, 1, level, eps, vectors, hnsw, null, Integer.MAX_VALUE, scoreCache);
       eps = new int[] {candidates.pop()};
     }
     // for levels <= nodeLevel search with topk = beamWidth, and add connections
@@ -284,11 +288,23 @@ public final class HnswGraphBuilder<T> {
     for (int level = Math.min(nodeLevel, curMaxLevel); level >= 0; level--) {
       candidates.clear();
       graphSearcher.searchLevel(
-          candidates, value, beamWidth, level, eps, vectors, hnsw, null, Integer.MAX_VALUE);
+          candidates,
+          value,
+          beamWidth,
+          level,
+          eps,
+          vectors,
+          hnsw,
+          null,
+          Integer.MAX_VALUE,
+          scoreCache);
       eps = candidates.nodes();
       hnsw.addNode(level, node);
       addDiverseNeighbors(level, node, candidates);
     }
+    String msg = String.format("score cache hit rate for ordinal %s = %s %%", node, scoreCache.hitRate());
+    System.out.println(msg);
+
   }
 
   public void addGraphNode(int node, RandomAccessVectorValues<T> values) throws IOException {
